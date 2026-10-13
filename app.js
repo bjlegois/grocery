@@ -3,7 +3,7 @@
 
   const M = window.GroceryMath;
   const API_URL = (window.GROCERY_CONFIG || {}).API_URL || '';
-  const K = { code: 'gp.code', cache: 'gp.cache', queue: 'gp.queue', checked: 'gp.checked', view: 'gp.view', lastStore: 'gp.lastStore' };
+  const K = { code: 'gp.code', codePrev: 'gp.codePrev', cache: 'gp.cache', queue: 'gp.queue', checked: 'gp.checked', view: 'gp.view', lastStore: 'gp.lastStore' };
 
   const ls = {
     get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } },
@@ -28,20 +28,43 @@
   const byName = (a, b) => a.name.localeCompare(b.name);
   const newId = () => (window.crypto && crypto.randomUUID ? crypto.randomUUID() : String(Math.random()).slice(2) + Date.now()).replace(/-/g, '').slice(0, 8);
 
-  /* ---------------------------------------------------------- setup link */
+  /* ------------------------------------------------------ household code
+   * The code is kept in two places: this browser's storage, and the page
+   * address (#code=…). The address copy means a bookmark or Home Screen icon
+   * carries the code, so a Private tab, another app's built-in browser or
+   * cleared Safari data can't lock you out. Browsers never send the part after
+   * # to the server, so the code doesn't reach GitHub.
+   */
+  const code = () => ls.get(K.code, '');
+
+  function hashCode() {
+    const m = location.hash.match(/[#&]code=([^&]+)/);
+    try { return m ? decodeURIComponent(m[1]).trim() : ''; } catch (e) { return ''; }
+  }
+
+  function showCodeInAddress() {
+    const c = code();
+    const want = c ? '#code=' + encodeURIComponent(c) : '';
+    if (location.hash !== want) history.replaceState(history.state, '', location.pathname + location.search + want);
+  }
+
+  function setCode(c) {
+    const old = code();
+    if (old && old !== c) ls.set(K.codePrev, old); // fallback if the new one gets refused
+    ls.set(K.code, c);
+    codeProblem = '';
+    showCodeInAddress();
+  }
 
   function takeSetupLink() {
-    const m = location.hash.match(/[#&]code=([^&]+)/);
-    if (!m) return false;
-    ls.set(K.code, decodeURIComponent(m[1]).trim());
-    history.replaceState(null, '', location.pathname + location.search);
-    codeProblem = '';
+    const c = hashCode();
+    if (!c || c === code()) { showCodeInAddress(); return false; }
+    setCode(c);
     return true;
   }
   takeSetupLink();
-  // The link can also arrive while the app is already open (only the #hash changes).
+  // A link can also arrive while the app is already open (only the #hash changes).
   window.addEventListener('hashchange', () => { if (takeSetupLink()) { render(); refresh(); } });
-  const code = () => ls.get(K.code, '');
 
   /* ----------------------------------------------------------------- api */
 
@@ -146,7 +169,19 @@
 
   function onError(err) {
     if (err.server && err.code === 'BAD_CODE') {
+      // An old bookmark can override a newer code. Fall back once to the code
+      // this phone had before, then give up and ask.
+      const prev = ls.get(K.codePrev, '');
+      ls.del(K.codePrev);
+      if (prev && prev !== code()) {
+        ls.set(K.code, prev);
+        showCodeInAddress();
+        setSync('idle');
+        setTimeout(refresh, 0); // after the current save attempt has finished
+        return;
+      }
       ls.del(K.code);
+      showCodeInAddress();
       codeProblem = 'That code didn’t work. Check it and try again.';
       setSync('idle');
       render();
@@ -646,7 +681,6 @@
     closeOverlay();
     render();
     toast('Deleted ' + name);
-    enqueue('deleteMeal', { meal: name });
   }
 
   /* Package editor */
@@ -799,8 +833,7 @@
     if (f.dataset.form === 'code') {
       const v = f.elements.code.value.trim();
       if (!v) return;
-      ls.set(K.code, v);
-      codeProblem = '';
+      setCode(v);
       render();
       refresh();
     }
